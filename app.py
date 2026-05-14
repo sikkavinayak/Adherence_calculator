@@ -205,11 +205,12 @@ def calculate_adherence():
         customer_col = None
 
         possible_customer_cols = [
+            'R.Plnt / Cust Code',
             'R.Plnt',
             'Cust Code',
             'Ship-to party',
             'Customer'
-        ]
+            ]
 
         for col in possible_customer_cols:
 
