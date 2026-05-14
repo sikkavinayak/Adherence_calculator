@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 
 # =========================================
-# CATEGORY THRESHOLDS
+# CATEGORY THRESHOLDS (fallback)
 # =========================================
 
 CATEGORY_THRESHOLDS = {
@@ -16,6 +16,7 @@ CATEGORY_THRESHOLDS = {
     'TBR': 2,
     'TRAC REAR': 2,
     'LTB': 2,
+    'LTR - AS': 2,
     'LTR-AS': 2,
     'TRAC FRONT': 2,
     'JEP': 2,
@@ -35,16 +36,54 @@ CATEGORY_THRESHOLDS = {
 # =========================================
 
 def excel_serial_date(date_val):
-
     if pd.isna(date_val):
         return ''
-
     try:
         date_val = pd.to_datetime(date_val)
-        excel_start = datetime(1899, 12, 30)
-        return int((date_val - excel_start).days)
+        return int((date_val - datetime(1899, 12, 30)).days)
     except:
         return ''
+
+
+# =========================================
+# CATEGORY DERIVATION
+# Mirrors Excel formula:
+#   =IF(MID(D,2,1)="P","PCTR",
+#    IF(MID(D,2,1)="W","Pouch tube",
+#    VLOOKUP(MID(D,3,1), Category Master!A:B, 2, 0)))
+# =========================================
+
+def build_category_lookup(category_master_df):
+    lookup = {}
+    for _, row in category_master_df.iterrows():
+        key = str(row.iloc[0]).strip()
+        val = str(row.iloc[1]).strip()
+        if key and key not in ('nan', 'Third letter'):
+            lookup[key] = val
+    return lookup
+
+def build_threshold_lookup(category_master_df):
+    lookup = {}
+    for _, row in category_master_df.iterrows():
+        cat = str(row.iloc[1]).strip()
+        thr = row.iloc[2]
+        if cat and cat != 'nan' and not pd.isna(thr):
+            lookup[cat] = int(thr)
+    return lookup
+
+def derive_category(material, cat_lookup):
+    material = str(material).strip()
+    if len(material) < 2:
+        return 'PCR'
+    char2 = material[1]           # MID(D,2,1)
+    if char2 == 'P':
+        return 'PCTR'
+    elif char2 == 'W':
+        return 'Pouch tube'
+    else:
+        if len(material) >= 3:
+            return cat_lookup.get(material[2], 'PCR')   # MID(D,3,1)
+        return 'PCR'
 
 
 # =========================================
@@ -53,7 +92,7 @@ def excel_serial_date(date_val):
 
 @app.route('/')
 def home():
-   return render_template('index.html')
+    return render_template('index.html')
 
 
 # =========================================
@@ -65,386 +104,218 @@ def calculate_adherence():
 
     try:
 
-        # =========================================
-        # READ FILES
-        # =========================================
-
-        # =========================================
-        # READ 4 FILES
-        # =========================================
-
+        # ── READ FILES ────────────────────────────────────────
         apo_file_1 = request.files['apo']
         apo_file_2 = request.files['apo2']
-
         yvr_file_1 = request.files['yvr']
         yvr_file_2 = request.files['yvr2']
+        calc_date  = request.form.get('calc_date', '')
 
-        # READ APO FILES
         apo_df_1 = pd.read_excel(apo_file_1)
         apo_df_2 = pd.read_excel(apo_file_2)
-
-        # READ YVR FILES
         yvr_df_1 = pd.read_excel(yvr_file_1)
         yvr_df_2 = pd.read_excel(yvr_file_2)
 
-        # COMBINE APO
-        apo_df = pd.concat(
-                [apo_df_1, apo_df_2],
-                ignore_index=True
-                )
+        # Optional Category Master upload
+        cat_master_file = request.files.get('category_master')
+        if cat_master_file:
+            cat_master_df    = pd.read_excel(cat_master_file)
+            cat_lookup       = build_category_lookup(cat_master_df)
+            threshold_lookup = build_threshold_lookup(cat_master_df)
+        else:
+            cat_lookup       = {}
+            threshold_lookup = CATEGORY_THRESHOLDS
 
-        # COMBINE YVR
-        yvr_df = pd.concat(
-        [yvr_df_1, yvr_df_2],
-        ignore_index=True
-        )
-
-        # =========================================
-        # CLEAN COLUMN NAMES
-        # =========================================
+        # ── COMBINE & CLEAN ───────────────────────────────────
+        apo_df = pd.concat([apo_df_1, apo_df_2], ignore_index=True)
+        yvr_df = pd.concat([yvr_df_1, yvr_df_2], ignore_index=True)
 
         apo_df.columns = apo_df.columns.str.strip()
         yvr_df.columns = yvr_df.columns.str.strip()
 
-        # =========================================
-        # APO CLEANING
-        # =========================================
+        # ── APO CLEANING ──────────────────────────────────────
+        apo_df['From Date']     = pd.to_datetime(apo_df['From Date'], errors='coerce')
+        apo_df['Material']      = apo_df['Material'].astype(str).str.strip().str.replace('.0', '', regex=False)
+        apo_df['To Location']   = apo_df['To Location'].astype(str).str.strip()
+        apo_df['From Location'] = apo_df['From Location'].astype(str).str.strip()
+        apo_df['Load Quantity'] = pd.to_numeric(apo_df['Load Quantity'], errors='coerce').fillna(0)
+        apo_df['Truck Number']  = pd.to_numeric(apo_df['Truck Number'],  errors='coerce').fillna(0)
 
-        apo_df['From Date'] = pd.to_datetime(
-            apo_df['From Date'],
-            errors='coerce'
+        apo_df['No of vehicles sent'] = pd.to_numeric(
+            apo_df.get('No of vehicles sent', 0), errors='coerce'
+        ).fillna(0)
+
+        # ── CATEGORY & THRESHOLD ──────────────────────────────
+        apo_df['Category']  = apo_df['Material'].apply(lambda m: derive_category(m, cat_lookup))
+        apo_df['Threshold'] = apo_df['Category'].map(threshold_lookup).fillna(1)
+
+        # ── ELIGIBILITY FLAGS (row level) ─────────────────────
+        #
+        # The APO sheet has one row PER TRUCK per SKU per DO per date.
+        # Excel logic:
+        #   INDICATOR          = Load_Qty > Threshold          (SKU meets min qty)
+        #   Check for inclusion = Truck_Number <= No_of_vehicles_sent
+        #                         (this truck was actually dispatched)
+        #
+        # Both must be 1 for a row to count.
+        #
+        apo_df['INDICATOR'] = np.where(
+            apo_df['Load Quantity'] > apo_df['Threshold'], 1, 0
+        )
+        apo_df['Check_for_inclusion'] = np.where(
+            (apo_df['No of vehicles sent'] > 0) &
+            (apo_df['Truck Number'] <= apo_df['No of vehicles sent']),
+            1, 0
+        )
+        apo_df['Eligible'] = np.where(
+            (apo_df['INDICATOR'] == 1) & (apo_df['Check_for_inclusion'] == 1),
+            1, 0
         )
 
-        # PREVIOUS DAY LOGIC
-        apo_df['Calc Date'] = (
-            apo_df['From Date']
-            - pd.Timedelta(days=1)
-        )
-
-        # CLEAN MATERIAL
-        apo_df['Material'] = (
-            apo_df['Material']
-            .astype(str)
-            .str.strip()
-            .str.replace('.0', '', regex=False)
-        )
-
-        # CLEAN TO LOCATION
-        apo_df['To Location'] = (
-            apo_df['To Location']
-            .astype(str)
-            .str.strip()
-        )
-
-        # DATE SERIAL
-        apo_df['DateSerial'] = (
-            apo_df['Calc Date']
-            .apply(excel_serial_date)
-        )
-
-        # UNIQUE ID
-        apo_df['Unique_ID'] = (
+        # ── UNIQUE ID ─────────────────────────────────────────
+        #   = To_Location + Excel_date_serial(From_Date) + Material
+        #   (no day shift — matches Excel Date&ABU formula exactly)
+        apo_df['DateSerial'] = apo_df['From Date'].apply(excel_serial_date)
+        apo_df['Unique_ID']  = (
             apo_df['To Location']
             + apo_df['DateSerial'].astype(str)
             + apo_df['Material']
         )
 
-        # =========================================
-        # CATEGORY LOGIC
-        # =========================================
+        # ── AGGREGATE ELIGIBLE APO ROWS BY UNIQUE_ID ─────────
+        #
+        # Multiple truck rows per SKU+DO+Date are summed to get
+        # total planned load — this is what the RESULT sheet shows.
+        #
+        eligible_apo = apo_df[apo_df['Eligible'] == 1]
 
-        def derive_category(material):
-
-            material = str(material).upper()
-
-            if 'PCR' in material:
-                return 'PCR'
-
-            elif 'TBR' in material:
-                return 'TBR'
-
-            elif '2W' in material or '3W' in material:
-                return '2/3W'
-
-            else:
-                return 'PCR'
-
-        apo_df['Category'] = (
-            apo_df['Material']
-            .apply(derive_category)
+        apo_grouped = (
+            eligible_apo.groupby(['Unique_ID', 'From Location', 'To Location', 'Material', 'Category', 'Threshold'])
+            ['Load Quantity'].sum()
+            .reset_index()
+            .rename(columns={'Load Quantity': 'Planned_Qty'})
         )
 
-        apo_df['Threshold'] = (
-            apo_df['Category']
-            .map(CATEGORY_THRESHOLDS)
-            .fillna(1)
+        # ── YVR CLEANING ──────────────────────────────────────
+        yvr_df['Billing Dt'] = pd.to_datetime(yvr_df['Billing Dt'], errors='coerce')
+
+        customer_col = next(
+            (c for c in ['R.Plnt / Cust Code', 'R.Plnt', 'Cust Code', 'Ship-to party', 'Customer']
+             if c in yvr_df.columns),
+            None
         )
-
-        # =========================================
-        # LOAD QUANTITY CLEANING
-        # =========================================
-
-        apo_df['Load Quantity'] = pd.to_numeric(
-            apo_df['Load Quantity'],
-            errors='coerce'
-        ).fillna(0)
-
-        # =========================================
-        # YVR CLEANING
-        # =========================================
-
-        yvr_df['Billing Dt'] = pd.to_datetime(
-            yvr_df['Billing Dt'],
-            errors='coerce'
-        )
-
-        # =========================================
-        # CUSTOMER / DO CLEANING
-        # =========================================
-
-        customer_col = None
-
-        possible_customer_cols = [
-            'R.Plnt / Cust Code',
-            'R.Plnt',
-            'Cust Code',
-            'Ship-to party',
-            'Customer'
-            ]
-
-        for col in possible_customer_cols:
-
-            if col in yvr_df.columns:
-                customer_col = col
-                break
-
         if customer_col is None:
-            return jsonify({
-                'error': 'Customer column not found'
-            })
+            return jsonify({'error': 'Customer column not found in YVR file'})
 
-        yvr_df['DO_CODE'] = (
-            yvr_df[customer_col]
-            .astype(str)
-            .str.replace('ZC', '', regex=False)
-            .str.strip()
+        # MID(col, 3, 4) in Excel = str[2:6] in Python
+        # e.g. "ZCAP01" -> "AP01"
+        yvr_df['DO_CODE'] = yvr_df[customer_col].astype(str).str.strip().str[2:6]
+
+        material_col = next(
+            (c for c in ['Mat.Code', 'Material', 'Material Number', 'SKU']
+             if c in yvr_df.columns),
+            None
         )
-
-        # =========================================
-        # MATERIAL COLUMN
-        # =========================================
-
-        material_col = None
-
-        possible_material_cols = [
-            'Material',
-            'Material Number',
-            'SKU'
-        ]
-
-        for col in possible_material_cols:
-
-            if col in yvr_df.columns:
-                material_col = col
-                break
-
         if material_col is None:
-            return jsonify({
-                'error': 'Material column not found'
-            })
+            return jsonify({'error': 'Material column not found in YVR file'})
 
         yvr_df[material_col] = (
-            yvr_df[material_col]
-            .astype(str)
-            .str.strip()
+            yvr_df[material_col].astype(str).str.strip()
             .str.replace('.0', '', regex=False)
         )
 
-        # =========================================
-        # QUANTITY COLUMN
-        # =========================================
-
-        qty_col = None
-
-        possible_qty_cols = [
-            'Billing Qty.',
-            'Quantity',
-            'Qty',
-            'Actual Qty'
-        ]
-
-        for col in possible_qty_cols:
-
-            if col in yvr_df.columns:
-                qty_col = col
-                break
-
-        if qty_col is None:
-            return jsonify({
-                'error': 'Quantity column not found'
-            })
-
-        yvr_df[qty_col] = pd.to_numeric(
-            yvr_df[qty_col],
-            errors='coerce'
-        ).fillna(0)
-
-        # =========================================
-        # DATE SERIAL
-        # =========================================
-
-        yvr_df['DateSerial'] = (
-            yvr_df['Billing Dt']
-            .apply(excel_serial_date)
+        qty_col = next(
+            (c for c in ['Quantity', 'Billing Qty.', 'Qty', 'Actual Qty']
+             if c in yvr_df.columns),
+            None
         )
+        if qty_col is None:
+            return jsonify({'error': 'Quantity column not found in YVR file'})
 
-        # =========================================
-        # UNIQUE ID
-        # =========================================
-
-        yvr_df['Unique_ID'] = (
+        yvr_df[qty_col]      = pd.to_numeric(yvr_df[qty_col], errors='coerce').fillna(0)
+        yvr_df['DateSerial'] = yvr_df['Billing Dt'].apply(excel_serial_date)
+        yvr_df['Unique_ID']  = (
             yvr_df['DO_CODE']
             + yvr_df['DateSerial'].astype(str)
             + yvr_df[material_col]
         )
 
-        # =========================================
-        # AGGREGATE ACTUALS
-        # =========================================
-
+        # ── AGGREGATE ACTUALS ─────────────────────────────────
         actual_dispatch = (
             yvr_df.groupby('Unique_ID')[qty_col]
             .sum()
             .reset_index()
+            .rename(columns={qty_col: 'Actual_Qty'})
         )
 
-        actual_dispatch.columns = [
-            'Unique_ID',
-            'Actual_Qty'
-        ]
+        # ── MERGE ─────────────────────────────────────────────
+        result_df = apo_grouped.merge(actual_dispatch, on='Unique_ID', how='left')
+        result_df['Actual_Qty'] = result_df['Actual_Qty'].fillna(0)
 
-        # =========================================
-        # DEBUGGING
-        # =========================================
-
-        print("========== APO IDS ==========")
-        print(apo_df['Unique_ID'].head(10))
-
-        print("========== YVR IDS ==========")
-        print(actual_dispatch['Unique_ID'].head(10))
-
-        # =========================================
-        # MERGE
-        # =========================================
-
-        result_df = apo_df.merge(
-            actual_dispatch,
-            on='Unique_ID',
-            how='left'
-        )
-
-        result_df['Actual_Qty'] = (
-            result_df['Actual_Qty']
-            .fillna(0)
-        )
-
-        # =========================================
-        # ADHERENCE LOGIC
-        # =========================================
-
+        # ── ADHERENCE FLAGS ───────────────────────────────────
         result_df['Adherence_Ratio'] = np.where(
-            result_df['Load Quantity'] > 0,
-            result_df['Actual_Qty']
-            / result_df['Load Quantity'],
+            result_df['Planned_Qty'] > 0,
+            result_df['Actual_Qty'] / result_df['Planned_Qty'],
             0
         )
 
+        # Strictly > 0.8 confirmed from RESULT sheet:
+        # rows with exactly 0.800 ratio → Result = 0
         result_df['Result'] = np.where(
-            result_df['Adherence_Ratio'] >= 0.8,
-            1,
-            0
+            result_df['Adherence_Ratio'] > 0.8,
+            1, 0
         )
 
-        # =========================================
-        # ELIGIBILITY
-        # =========================================
-
-        result_df['Eligible'] = np.where(
-            result_df['Load Quantity']
-            >= result_df['Threshold'],
-            1,
-            0
-        )
-
-        # TEMPORARILY KEEP ALL ROWS
-        # TO MATCH EXCEL BETTER
-
-        eligible_df = result_df.copy()
-
-        # =========================================
-        # SUMMARY
-        # =========================================
-
-        summary = (
-            eligible_df.groupby('From Location')
+        # ── SUMMARY PER RDC ───────────────────────────────────
+        rdc_summary = (
+            result_df.groupby('From Location')
             .agg(
-                Total_Planned=('Result', 'count'),
-                Adhered=('Result', 'sum')
+                numerator=('Result', 'sum'),
+                denominator=('Result', 'count')
             )
             .reset_index()
+            .rename(columns={'From Location': 'rdc'})
         )
-
-        summary['Adherence_Percent'] = (
-            summary['Adhered']
-            / summary['Total_Planned']
-            * 100
+        rdc_summary['adherence'] = (
+            rdc_summary['numerator'] / rdc_summary['denominator'] * 100
         ).round(2)
 
-        # =========================================
-        # DEBUG OUTPUT
-        # =========================================
+        # ── OVERALL ───────────────────────────────────────────
+        total_den = int(rdc_summary['denominator'].sum())
+        total_num = int(rdc_summary['numerator'].sum())
+        overall_adh = round(total_num / total_den * 100, 2) if total_den > 0 else 0
 
-        print("========== MERGED SAMPLE ==========")
-
-        print(
-            result_df[[
-                'Unique_ID',
-                'Load Quantity',
-                'Actual_Qty',
-                'Adherence_Ratio',
-                'Result'
-            ]].head(20)
-        )
-
-        # =========================================
-        # RESPONSE
-        # =========================================
+        # ── DETAIL ROWS — field names match index.html exactly ─
+        detail = []
+        for _, row in result_df.iterrows():
+            detail.append({
+                'rdc':        str(row['From Location']),
+                'do':         str(row['To Location']),
+                'material':   str(row['Material']),
+                'category':   str(row['Category']),
+                'apo_qty':    int(row['Planned_Qty']),
+                'threshold':  int(row['Threshold']),
+                'actual':     int(row['Actual_Qty']),
+                'dispatched': bool(row['Actual_Qty'] > 0),
+                'included':   True,   # all rows here are already eligible
+                'adhered':    bool(row['Result'])
+            })
 
         return jsonify({
-
-            'summary': summary.to_dict(
-                orient='records'
-            ),
-
-            'details': eligible_df[[
-                'From Location',
-                'To Location',
-                'Material',
-                'Load Quantity',
-                'Actual_Qty',
-                'Adherence_Ratio',
-                'Result'
-            ]].to_dict(orient='records')
-
+            'calc_date': calc_date,
+            'overall': {
+                'adherence':   overall_adh,
+                'numerator':   total_num,
+                'denominator': total_den
+            },
+            'rdc_summary': rdc_summary.to_dict(orient='records'),
+            'detail':      detail
         })
 
     except Exception as e:
-
-        print("ERROR:", str(e))
-
-        return jsonify({
-            'error': str(e)
-        })
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)})
 
 
 # =========================================
@@ -452,9 +323,4 @@ def calculate_adherence():
 # =========================================
 
 if __name__ == '__main__':
-
-    app.run(
-        debug=False,
-        host='0.0.0.0',
-        port=5000
-    )
+    app.run(debug=False, host='0.0.0.0', port=5000)
