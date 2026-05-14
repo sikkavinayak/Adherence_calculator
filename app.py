@@ -141,9 +141,16 @@ def calculate_adherence():
         apo_df['Load Quantity'] = pd.to_numeric(apo_df['Load Quantity'], errors='coerce').fillna(0)
         apo_df['Truck Number']  = pd.to_numeric(apo_df['Truck Number'],  errors='coerce').fillna(0)
 
-        apo_df['No of vehicles sent'] = pd.to_numeric(
-            apo_df.get('No of vehicles sent', 0), errors='coerce'
-        ).fillna(0)
+        if 'No of vehicles sent' in apo_df.columns:
+
+            apo_df['No of vehicles sent'] = pd.to_numeric(
+            apo_df['No of vehicles sent'],
+            errors='coerce'
+                ).fillna(0)
+
+        else:
+
+            apo_df['No of vehicles sent'] = 0
 
         # ── CATEGORY & THRESHOLD ──────────────────────────────
         apo_df['Category']  = apo_df['Material'].apply(lambda m: derive_category(m, cat_lookup))
