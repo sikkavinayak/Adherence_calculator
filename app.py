@@ -70,34 +70,34 @@ def calculate_adherence():
         # =========================================
 
         # =========================================
-# READ 4 FILES
-# =========================================
+        # READ 4 FILES
+        # =========================================
 
-apo_file_1 = request.files['apo']
-apo_file_2 = request.files['apo2']
+        apo_file_1 = request.files['apo']
+        apo_file_2 = request.files['apo2']
 
-yvr_file_1 = request.files['yvr']
-yvr_file_2 = request.files['yvr2']
+        yvr_file_1 = request.files['yvr']
+        yvr_file_2 = request.files['yvr2']
 
-# READ APO FILES
-apo_df_1 = pd.read_excel(apo_file_1)
-apo_df_2 = pd.read_excel(apo_file_2)
+        # READ APO FILES
+        apo_df_1 = pd.read_excel(apo_file_1)
+        apo_df_2 = pd.read_excel(apo_file_2)
 
-# READ YVR FILES
-yvr_df_1 = pd.read_excel(yvr_file_1)
-yvr_df_2 = pd.read_excel(yvr_file_2)
+        # READ YVR FILES
+        yvr_df_1 = pd.read_excel(yvr_file_1)
+        yvr_df_2 = pd.read_excel(yvr_file_2)
 
-# COMBINE APO
-apo_df = pd.concat(
-    [apo_df_1, apo_df_2],
-    ignore_index=True
-)
+        # COMBINE APO
+        apo_df = pd.concat(
+                [apo_df_1, apo_df_2],
+                ignore_index=True
+                )
 
-# COMBINE YVR
-yvr_df = pd.concat(
-    [yvr_df_1, yvr_df_2],
-    ignore_index=True
-)
+        # COMBINE YVR
+        yvr_df = pd.concat(
+        [yvr_df_1, yvr_df_2],
+        ignore_index=True
+        )
 
         # =========================================
         # CLEAN COLUMN NAMES
