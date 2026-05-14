@@ -158,7 +158,7 @@ def calculate_adherence(apo_dfs, yvr_dfs, calc_date_str):
 
 @app.route('/')
 def index():
-    return render_template_string(open('/home/claude/dispatch_app/index.html').read())
+    return render_template_string(open('index.html').read())
 
 @app.route('/calculate', methods=['POST'])
 def calculate():
